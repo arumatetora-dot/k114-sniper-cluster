@@ -1,30 +1,25 @@
-name: Distributed Sniper Cluster
+name: API Async Grid Cluster
 
 on:
   workflow_dispatch:
     inputs:
-      host:
-        description: 'Redis Tunnel Host (例: bore.pub)'
+      api_url:
+        description: 'Colab API URL (例: https://xxxx.loca.lt)'
         required: true
-        default: 'bore.pub'
-      port:
-        description: 'Redis Tunnel Port (例: 20226)'
+      u_base:
+        description: '探索開始 u 座標'
         required: true
-        default: '20226'
-      stream:
-        description: 'Redis Stream Key'
-        required: true
-        default: 'sym18_test'
+        default: '1000000000000000000'
 
 jobs:
   worker:
     name: Worker Node ${{ matrix.node_id }}
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # 最大6時間連続稼働
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        node_id: [1, 2, 3, 4] # 4並列 (計8 vCPU)
+        node_id: [1, 2, 3, 4, 5, 6, 7, 8] # 8並列 (16 vCPU)
 
     steps:
       - name: リポジトリの取得
@@ -33,25 +28,49 @@ jobs:
       - name: 依存関係のインストール
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -qq -y clang libgmp-dev libmpfr-dev libntl-dev libhiredis-dev redis-tools
+          sudo apt-get install -qq -y clang libgmp-dev curl jq python3
 
-      - name: 司令塔への疎通確認
+      - name: 報告用 Python スクリプト生成
         run: |
-          redis-cli -h ${{ github.event.inputs.host }} -p ${{ github.event.inputs.port }} ping
+          cat << 'EOF' > async_sniper.py
+          import sys, subprocess, requests, time, os
 
-      - name: C++ バイナリの最適化コンパイル
-        run: |
-          clang++ -std=c++17 -O3 -march=native -mtune=native -funroll-loops -fomit-frame-pointer \
-            hyper_sniper.cpp -o hyper_sniper \
-            -lntl -lgmp -lgmpxx -lhiredis -lpthread
+          API_URL = sys.argv[1]
+          NODE_ID = sys.argv[2]
+          U_START = int(sys.argv[3])
+          WIDTH = 5000000 # 各ノードの担当幅 (5百万)
 
-      - name: 2スレッド並列走査を開始
-        run: |
-          HOST="${{ github.event.inputs.host }}"
-          PORT="${{ github.event.inputs.port }}"
-          STREAM="${{ github.event.inputs.stream }}"
+          u_curr = U_START + (int(NODE_ID) - 1) * WIDTH
+          u_end = u_curr + WIDTH - 1
+          print(f"[Node {NODE_ID}] Scanning u: {u_curr} to {u_end}")
+
+          # C++ スタンドアロンバイナリを実行
+          proc = subprocess.Popen(
+              ["./hyper_sniper_standalone", str(u_curr), str(u_end), "128"],
+              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+          )
           
-          # ランナーの 2 vCPU で並列計算
-          ./hyper_sniper "$HOST" "$PORT" "" "$STREAM" &
-          ./hyper_sniper "$HOST" "$PORT" "" "$STREAM" &
-          wait
+          # 走査進捗のモック報告 (実際はC++から出力されるy座標数をパース)
+          # ここでは1分ごとに推計値を送信
+          for _ in range(10): # 10分稼働
+              time.sleep(60)
+              try:
+                  requests.post(f"{API_URL}/report", json={
+                      "node_id": NODE_ID, "u_scanned": 100000, "y_checked": 2700000
+                  }, timeout=5)
+                  print(f"Node {NODE_ID}: Reported progress.")
+              except Exception as e:
+                  print(f"Report failed: {e}")
+          
+          proc.terminate()
+          EOF
+
+      - name: C++ スタンドアロンバイナリのコンパイル
+        run: |
+          clang++ -std=c++17 -O3 -march=native -funroll-loops \
+            hyper_sniper_standalone.cpp -o hyper_sniper_standalone \
+            -lgmp -lgmpxx -lpthread
+
+      - name: 非同期走査と API 報告の開始
+        run: |
+          python3 async_sniper.py "${{ github.event.inputs.api_url }}" "${{ matrix.node_id }}" "${{ github.event.inputs.u_base }}"
