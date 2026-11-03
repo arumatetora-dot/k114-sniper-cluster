@@ -1,4 +1,3 @@
-%%writefile hyper_sniper.cpp
 #include <bits/stdc++.h>
 #include <gmp.h>
 #include <gmpxx.h>
