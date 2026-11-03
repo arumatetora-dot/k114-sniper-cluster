@@ -1,0 +1,57 @@
+name: Distributed Sniper Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: 'Redis Tunnel Host (例: bore.pub)'
+        required: true
+        default: 'bore.pub'
+      port:
+        description: 'Redis Tunnel Port (例: 20226)'
+        required: true
+        default: '20226'
+      stream:
+        description: 'Redis Stream Key'
+        required: true
+        default: 'sym18_test'
+
+jobs:
+  worker:
+    name: Worker Node ${{ matrix.node_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # 最大6時間連続稼働
+    strategy:
+      fail-fast: false
+      matrix:
+        node_id: [1, 2, 3, 4] # 4並列 (計8 vCPU)
+
+    steps:
+      - name: リポジトリの取得
+        uses: actions/checkout@v4
+
+      - name: 依存関係のインストール
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y clang libgmp-dev libmpfr-dev libntl-dev libhiredis-dev redis-tools
+
+      - name: 司令塔への疎通確認
+        run: |
+          redis-cli -h ${{ github.event.inputs.host }} -p ${{ github.event.inputs.port }} ping
+
+      - name: C++ バイナリの最適化コンパイル
+        run: |
+          clang++ -std=c++17 -O3 -march=native -mtune=native -funroll-loops -fomit-frame-pointer \
+            hyper_sniper.cpp -o hyper_sniper \
+            -lntl -lgmp -lgmpxx -lhiredis -lpthread
+
+      - name: 2スレッド並列走査を開始
+        run: |
+          HOST="${{ github.event.inputs.host }}"
+          PORT="${{ github.event.inputs.port }}"
+          STREAM="${{ github.event.inputs.stream }}"
+          
+          # ランナーの 2 vCPU で並列計算
+          ./hyper_sniper "$HOST" "$PORT" "" "$STREAM" &
+          ./hyper_sniper "$HOST" "$PORT" "" "$STREAM" &
+          wait
